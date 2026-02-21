@@ -32,21 +32,24 @@ export const SwaggerAutomation = () => {
   const [testCases, setTestCases] = useState<TestCase[]>([]);
   const [success, setSuccess] = useState<string | null>(null);
 
+  const [swaggerData, setSwaggerData] = useState<any>(null);
+
   const handleProcess = async () => {
     setLoading(true);
     setError(null);
     setSuccess(null);
     try {
-      let swaggerData;
+      let data;
       if (input.trim().startsWith('http')) {
         const response = await fetch(input);
-        swaggerData = await response.json();
+        data = await response.json();
       } else {
-        swaggerData = JSON.parse(input);
+        data = JSON.parse(input);
       }
 
-      const parsedEndpoints = parseSwagger(swaggerData);
-      const generatedTests = generateTestCases(parsedEndpoints, swaggerData);
+      setSwaggerData(data);
+      const parsedEndpoints = parseSwagger(data);
+      const generatedTests = generateTestCases(parsedEndpoints, data);
       
       setEndpoints(parsedEndpoints);
       setTestCases(generatedTests);
@@ -61,9 +64,9 @@ export const SwaggerAutomation = () => {
 
   const downloadActions = [
     { name: 'Excel Test Cases', icon: Table, action: () => generateExcel(testCases), color: 'bg-green-500/10 text-green-500' },
-    { name: 'Postman Collection', icon: FileJson, action: () => generatePostman(endpoints), color: 'bg-orange-500/10 text-orange-500' },
-    { name: 'SoapUI Project', icon: ShieldCheck, action: () => generateSoapUIXML(endpoints), color: 'bg-blue-500/10 text-blue-500' },
-    { name: 'Python Scripts', icon: FileCode, action: () => generatePythonScripts(endpoints), color: 'bg-yellow-500/10 text-yellow-500' },
+    { name: 'Postman Collection', icon: FileJson, action: () => generatePostman(endpoints, swaggerData), color: 'bg-orange-500/10 text-orange-500' },
+    { name: 'SoapUI Project', icon: ShieldCheck, action: () => generateSoapUIXML(endpoints, swaggerData), color: 'bg-blue-500/10 text-blue-500' },
+    { name: 'Python Scripts', icon: FileCode, action: () => generatePythonScripts(endpoints, swaggerData), color: 'bg-yellow-500/10 text-yellow-500' },
   ];
 
   return (

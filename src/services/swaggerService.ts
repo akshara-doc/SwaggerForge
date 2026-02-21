@@ -43,13 +43,29 @@ export function parseSwagger(data: any): Endpoint[] {
   Object.keys(paths).forEach((path) => {
     Object.keys(paths[path]).forEach((method) => {
       const op = paths[path][method];
+      
+      // Handle Swagger 2.0 body parameter vs OpenAPI 3.0 requestBody
+      let requestBody = op.requestBody;
+      if (!requestBody && op.parameters) {
+        const bodyParam = op.parameters.find((p: any) => p.in === 'body');
+        if (bodyParam) {
+          requestBody = {
+            content: {
+              'application/json': {
+                schema: bodyParam.schema
+              }
+            }
+          };
+        }
+      }
+
       endpoints.push({
         path,
         method: method.toUpperCase(),
         summary: op.summary || op.description || `${method.toUpperCase()} ${path}`,
         parameters: op.parameters || [],
         responses: op.responses || {},
-        requestBody: op.requestBody,
+        requestBody,
         operationId: op.operationId,
         tags: op.tags,
       });
@@ -254,17 +270,48 @@ export function generateTestCases(endpoints: Endpoint[], fullDoc: any): TestCase
 }
 
 export function generateExcel(testCases: TestCase[]) {
-  const worksheet = XLSX.utils.json_to_sheet(testCases);
   const workbook = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(workbook, worksheet, 'Test Cases');
+  
+  // Group by resource (first segment of path or 'General')
+  const groups: Record<string, TestCase[]> = {};
+  testCases.forEach(tc => {
+    // Extract resource name from endpoint path (e.g., /users/profile -> users)
+    const segments = tc.Endpoint.split('/').filter(Boolean);
+    const resource = segments[0] || 'General';
+    if (!groups[resource]) groups[resource] = [];
+    groups[resource].push(tc);
+  });
+
+  Object.keys(groups).forEach(resourceName => {
+    const worksheet = XLSX.utils.json_to_sheet(groups[resourceName]);
+    
+    // Set column widths for better readability
+    const maxWidths = [
+      { wch: 15 }, // ID
+      { wch: 30 }, // Endpoint
+      { wch: 10 }, // Method
+      { wch: 40 }, // Scenario
+      { wch: 50 }, // Steps
+      { wch: 30 }, // Prerequisite
+      { wch: 60 }, // Test Data (JSON body)
+      { wch: 40 }, // Expected
+      { wch: 20 }, // Actual
+      { wch: 10 }, // Status
+    ];
+    worksheet['!cols'] = maxWidths;
+
+    // Sheet names have a 31 char limit and some restricted chars
+    const safeName = resourceName.substring(0, 31).replace(/[\\/?*[\]]/g, '_');
+    XLSX.utils.book_append_sheet(workbook, worksheet, safeName);
+  });
+
   const excelBuffer = XLSX.write(workbook, { bookType: 'xlsx', type: 'array' });
   downloadFile(excelBuffer, 'API_Test_Cases.xlsx', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
 }
 
-export function generatePostman(endpoints: Endpoint[], name: string = 'Swagger Collection') {
+export function generatePostman(endpoints: Endpoint[], fullDoc: any, name: string = 'Swagger Collection') {
   // Group endpoints by tags for folder structure
   const folders: Record<string, any[]> = {};
-  const rootItems: any[] = [];
 
   endpoints.forEach((ep) => {
     const tag = ep.tags?.[0] || 'General';
@@ -275,8 +322,11 @@ export function generatePostman(endpoints: Endpoint[], name: string = 'Swagger C
       `pm.test("Status code is 200/201", function () {`,
       `    pm.expect(pm.response.code).to.be.oneOf([200, 201]);`,
       `});`,
-      `pm.test("Response time is less than 800ms", function () {`,
-      `    pm.expect(pm.response.responseTime).to.be.below(800);`,
+      `pm.test("Response time is less than 1000ms", function () {`,
+      `    pm.expect(pm.response.responseTime).to.be.below(1000);`,
+      `});`,
+      `pm.test("Content-Type is application/json", function () {`,
+      `    pm.expect(pm.response.headers.get('Content-Type')).to.include('application/json');`,
       `});`,
       `pm.test("Response is valid JSON", function () {`,
       `    pm.response.to.be.withBody;`,
@@ -295,6 +345,20 @@ export function generatePostman(endpoints: Endpoint[], name: string = 'Swagger C
       );
     }
 
+    let body: any = null;
+    if (ep.requestBody?.content?.['application/json']?.schema) {
+      const sample = generateSampleJson(ep.requestBody.content['application/json'].schema, fullDoc);
+      body = {
+        mode: 'raw',
+        raw: sample,
+        options: {
+          raw: {
+            language: 'json'
+          }
+        }
+      };
+    }
+
     const item = {
       name: ep.summary,
       request: {
@@ -302,6 +366,7 @@ export function generatePostman(endpoints: Endpoint[], name: string = 'Swagger C
         header: [
           { key: "Content-Type", value: "application/json" }
         ],
+        body,
         url: {
           raw: `{{baseUrl}}${ep.path}`,
           host: ['{{baseUrl}}'],
@@ -338,7 +403,7 @@ export function generatePostman(endpoints: Endpoint[], name: string = 'Swagger C
   downloadFile(json, 'Postman_Collection.json', 'application/json');
 }
 
-export function generateSoapUIXML(endpoints: Endpoint[]) {
+export function generateSoapUIXML(endpoints: Endpoint[], fullDoc: any) {
   const projectId = `Project_${Math.random().toString(36).substr(2, 9)}`;
   const interfaceId = `Interface_${Math.random().toString(36).substr(2, 9)}`;
   const testSuiteId = `TestSuite_${Math.random().toString(36).substr(2, 9)}`;
@@ -353,12 +418,17 @@ export function generateSoapUIXML(endpoints: Endpoint[]) {
     ${endpoints.map(ep => {
       const resourceId = `Res_${Math.random().toString(36).substr(2, 5)}`;
       const methodId = `Meth_${Math.random().toString(36).substr(2, 5)}`;
+      let requestBody = '';
+      if (ep.requestBody?.content?.['application/json']?.schema) {
+        requestBody = generateSampleJson(ep.requestBody.content['application/json'].schema, fullDoc);
+      }
       return `
     <con:resource name="${ep.path}" path="${ep.path}" id="${resourceId}">
       <con:method name="${ep.method}" id="${methodId}" method="${ep.method}">
         <con:request name="Request 1" id="${Math.random().toString(36).substr(2, 9)}" mediaType="application/json">
           <con:settings/>
           <con:endpoint>http://localhost:8080</con:endpoint>
+          <con:request><![CDATA[${requestBody}]]></con:request>
           <con:parameters/>
         </con:request>
       </con:method>
@@ -372,6 +442,10 @@ export function generateSoapUIXML(endpoints: Endpoint[]) {
     ${endpoints.map(ep => {
       const testCaseId = `TC_${Math.random().toString(36).substr(2, 5)}`;
       const stepId = `Step_${Math.random().toString(36).substr(2, 5)}`;
+      let requestBody = '';
+      if (ep.requestBody?.content?.['application/json']?.schema) {
+        requestBody = generateSampleJson(ep.requestBody.content['application/json'].schema, fullDoc);
+      }
       return `
     <con:testCase id="${testCaseId}" failOnError="true" inheritOptions="true" name="${ep.summary}" keepSession="false" maxResults="0" searchProperties="true">
       <con:settings/>
@@ -381,7 +455,7 @@ export function generateSoapUIXML(endpoints: Endpoint[]) {
           <con:restRequest name="${ep.method} Request" id="${Math.random().toString(36).substr(2, 9)}" mediaType="application/json">
             <con:settings/>
             <con:endpoint>http://localhost:8080</con:endpoint>
-            <con:request/>
+            <con:request><![CDATA[${requestBody}]]></con:request>
             <con:assertion type="Valid HTTP Status Codes" name="Valid HTTP Status Codes" id="${Math.random().toString(36).substr(2, 9)}">
               <con:configuration>
                 <codes>200,201</codes>
@@ -397,6 +471,13 @@ export function generateSoapUIXML(endpoints: Endpoint[]) {
                 <path>$</path>
                 <content>*</content>
                 <allowWildcards>true</allowWildcards>
+              </con:configuration>
+            </con:assertion>
+            <con:assertion type="Simple Contains" name="Contains JSON" id="${Math.random().toString(36).substr(2, 9)}">
+              <con:configuration>
+                <token>{</token>
+                <ignoreCase>false</ignoreCase>
+                <useRegEx>false</useRegEx>
               </con:configuration>
             </con:assertion>
             <con:credentials>
@@ -421,24 +502,51 @@ export function generateSoapUIXML(endpoints: Endpoint[]) {
   downloadFile(xml, 'SoapUI_Project.xml', 'application/xml');
 }
 
-export function generatePythonScripts(endpoints: Endpoint[]) {
+export function generatePythonScripts(endpoints: Endpoint[], fullDoc: any) {
   let script = `import requests
 import unittest
+import json
+import time
 
 BASE_URL = "http://localhost:8080"
 
 class TestAPI(unittest.TestCase):
+    def setUp(self):
+        self.session = requests.Session()
+        self.session.headers.update({"Content-Type": "application/json"})
+
 `;
 
   endpoints.forEach((ep, index) => {
     const methodName = ep.summary.replace(/[^a-zA-Z0-9]/g, '_').toLowerCase() || `test_endpoint_${index}`;
+    let requestBody = 'None';
+    if (ep.requestBody?.content?.['application/json']?.schema) {
+      requestBody = generateSampleJson(ep.requestBody.content['application/json'].schema, fullDoc);
+    }
+
     script += `
     def test_${methodName}(self):
         """${ep.summary}"""
         url = f"{BASE_URL}${ep.path}"
-        response = requests.request("${ep.method}", url)
-        self.assertIn(response.status_code, [200, 201])
-        print(f"Tested {ep.path} - Status: {response.status_code}")
+        payload_str = ${requestBody === 'None' ? 'None' : `'''${requestBody}'''`}
+        payload = json.loads(payload_str) if payload_str else None
+        
+        start_time = time.time()
+        response = self.session.request("${ep.method}", url, json=payload)
+        duration = (time.time() - start_time) * 1000
+        
+        # Assertions
+        self.assertIn(response.status_code, [200, 201], f"Unexpected status code: {response.status_code}")
+        self.assertLess(duration, 1000, f"Response time too high: {duration}ms")
+        self.assertTrue(response.headers.get('Content-Type', '').startswith('application/json'), "Response is not JSON")
+        
+        try:
+            data = response.json()
+            self.assertIsNotNone(data, "Response body is empty")
+        except ValueError:
+            self.fail("Response is not valid JSON")
+            
+        print(f"PASSED: ${ep.method} ${ep.path} ({duration:.2f}ms)")
 `;
   });
 
